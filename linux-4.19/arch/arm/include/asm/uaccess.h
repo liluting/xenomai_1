@@ -16,6 +16,7 @@
 #include <asm/domain.h>
 #include <asm/unified.h>
 #include <asm/compiler.h>
+#include <asm-generic/ipipe.h>
 
 #include <asm/extable.h>
 
@@ -232,7 +233,7 @@ extern int __get_user_64t_4(void *);
 
 #define get_user(x, p)							\
 	({								\
-		might_fault();						\
+		__ipipe_uaccess_might_fault();				\
 		__get_user_check(x, p);					\
 	 })
 
@@ -316,7 +317,7 @@ do {									\
 	unsigned long __gu_val;						\
 	unsigned int __ua_flags;					\
 	__chk_user_ptr(ptr);						\
-	might_fault();							\
+	__ipipe_uaccess_might_fault();					\
 	__ua_flags = uaccess_save_and_enable();				\
 	switch (sizeof(*(ptr))) {					\
 	case 1:	__get_user_asm_byte(__gu_val, __gu_addr, err);	break;	\
@@ -349,13 +350,6 @@ do {									\
 #define __get_user_asm_byte(x, addr, err)			\
 	__get_user_asm(x, addr, err, ldrb)
 
-#if __LINUX_ARM_ARCH__ >= 6
-
-#define __get_user_asm_half(x, addr, err)			\
-	__get_user_asm(x, addr, err, ldrh)
-
-#else
-
 #ifndef __ARMEB__
 #define __get_user_asm_half(x, __gu_addr, err)			\
 ({								\
@@ -374,8 +368,6 @@ do {									\
 })
 #endif
 
-#endif /* __LINUX_ARM_ARCH__ >= 6 */
-
 #define __get_user_asm_word(x, addr, err)			\
 	__get_user_asm(x, addr, err, ldr)
 #endif
@@ -386,7 +378,7 @@ do {									\
 		const __typeof__(*(ptr)) __user *__pu_ptr = (ptr);	\
 		__typeof__(*(ptr)) __pu_val = (x);			\
 		unsigned int __ua_flags;				\
-		might_fault();						\
+		__ipipe_uaccess_might_fault();				\
 		__ua_flags = uaccess_save_and_enable();			\
 		switch (sizeof(*(ptr))) {				\
 		case 1: __fn(__pu_val, __pu_ptr, __err, 1); break;	\
@@ -451,13 +443,6 @@ do {									\
 #define __put_user_asm_byte(x, __pu_addr, err)			\
 	__put_user_asm(x, __pu_addr, err, strb)
 
-#if __LINUX_ARM_ARCH__ >= 6
-
-#define __put_user_asm_half(x, __pu_addr, err)			\
-	__put_user_asm(x, __pu_addr, err, strh)
-
-#else
-
 #ifndef __ARMEB__
 #define __put_user_asm_half(x, __pu_addr, err)			\
 ({								\
@@ -473,8 +458,6 @@ do {									\
 	__put_user_asm_byte(__temp, __pu_addr + 1, err);	\
 })
 #endif
-
-#endif /* __LINUX_ARM_ARCH__ >= 6 */
 
 #define __put_user_asm_word(x, __pu_addr, err)			\
 	__put_user_asm(x, __pu_addr, err, str)

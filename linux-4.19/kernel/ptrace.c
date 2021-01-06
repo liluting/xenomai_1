@@ -258,11 +258,12 @@ static int ptrace_check_attach(struct task_struct *child, bool ignore_state)
 	return ret;
 }
 
-static bool ptrace_has_cap(struct user_namespace *ns, unsigned int mode)
+static int ptrace_has_cap(struct user_namespace *ns, unsigned int mode)
 {
 	if (mode & PTRACE_MODE_NOAUDIT)
-		return ns_capable_noaudit(ns, CAP_SYS_PTRACE);
-	return ns_capable(ns, CAP_SYS_PTRACE);
+		return has_ns_capability_noaudit(current, ns, CAP_SYS_PTRACE);
+	else
+		return has_ns_capability(current, ns, CAP_SYS_PTRACE);
 }
 
 /* Returns 0 on success, -errno on denial. */
@@ -822,6 +823,8 @@ static int ptrace_resume(struct task_struct *child, long request,
 	} else {
 		user_disable_single_step(child);
 	}
+
+	__ipipe_report_ptrace_resume(child, request);
 
 	/*
 	 * Change ->exit_code and ->state under siglock to avoid the race

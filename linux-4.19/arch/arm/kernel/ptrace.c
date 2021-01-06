@@ -216,6 +216,10 @@ void ptrace_break(struct task_struct *tsk, struct pt_regs *regs)
 
 static int break_trap(struct pt_regs *regs, unsigned int instr)
 {
+
+	if (__ipipe_report_trap(IPIPE_TRAP_BREAK,regs))
+		return 0;
+
 	ptrace_break(current, regs);
 	return 0;
 }
@@ -229,8 +233,8 @@ static struct undef_hook arm_break_hook = {
 };
 
 static struct undef_hook thumb_break_hook = {
-	.instr_mask	= 0xffffffff,
-	.instr_val	= 0x0000de01,
+	.instr_mask	= 0xffff,
+	.instr_val	= 0xde01,
 	.cpsr_mask	= PSR_T_BIT,
 	.cpsr_val	= PSR_T_BIT,
 	.fn		= break_trap,

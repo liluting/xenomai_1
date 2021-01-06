@@ -345,6 +345,8 @@ static void __setup_APIC_LVTT(unsigned int clocks, int oneshot, int irqen)
 		 * According to Intel, MFENCE can do the serialization here.
 		 */
 		asm volatile("mfence" : : : "memory");
+
+		printk_once(KERN_DEBUG "TSC deadline timer enabled\n");
 		return;
 	}
 
@@ -543,7 +545,7 @@ static DEFINE_PER_CPU(struct clock_event_device, lapic_events);
 #define DEADLINE_MODEL_MATCH_REV(model, rev)	\
 	{ X86_VENDOR_INTEL, 6, model, X86_FEATURE_ANY, (unsigned long)rev }
 
-static __init u32 hsx_deadline_rev(void)
+static u32 hsx_deadline_rev(void)
 {
 	switch (boot_cpu_data.x86_stepping) {
 	case 0x02: return 0x3a; /* EP */
@@ -553,7 +555,7 @@ static __init u32 hsx_deadline_rev(void)
 	return ~0U;
 }
 
-static __init u32 bdx_deadline_rev(void)
+static u32 bdx_deadline_rev(void)
 {
 	switch (boot_cpu_data.x86_stepping) {
 	case 0x02: return 0x00000011;
@@ -565,7 +567,7 @@ static __init u32 bdx_deadline_rev(void)
 	return ~0U;
 }
 
-static __init u32 skx_deadline_rev(void)
+static u32 skx_deadline_rev(void)
 {
 	switch (boot_cpu_data.x86_stepping) {
 	case 0x03: return 0x01000136;
@@ -578,7 +580,7 @@ static __init u32 skx_deadline_rev(void)
 	return ~0U;
 }
 
-static const struct x86_cpu_id deadline_match[] __initconst = {
+static const struct x86_cpu_id deadline_match[] = {
 	DEADLINE_MODEL_MATCH_FUNC( INTEL_FAM6_HASWELL_X,	hsx_deadline_rev),
 	DEADLINE_MODEL_MATCH_REV ( INTEL_FAM6_BROADWELL_X,	0x0b000020),
 	DEADLINE_MODEL_MATCH_FUNC( INTEL_FAM6_BROADWELL_XEON_D,	bdx_deadline_rev),
@@ -600,19 +602,18 @@ static const struct x86_cpu_id deadline_match[] __initconst = {
 	{},
 };
 
-static __init bool apic_validate_deadline_timer(void)
+static void apic_check_deadline_errata(void)
 {
 	const struct x86_cpu_id *m;
 	u32 rev;
 
-	if (!boot_cpu_has(X86_FEATURE_TSC_DEADLINE_TIMER))
-		return false;
-	if (boot_cpu_has(X86_FEATURE_HYPERVISOR))
-		return true;
+	if (!boot_cpu_has(X86_FEATURE_TSC_DEADLINE_TIMER) ||
+	    boot_cpu_has(X86_FEATURE_HYPERVISOR))
+		return;
 
 	m = x86_match_cpu(deadline_match);
 	if (!m)
-		return true;
+		return;
 
 	/*
 	 * Function pointers will have the MSB set due to address layout,
@@ -624,12 +625,11 @@ static __init bool apic_validate_deadline_timer(void)
 		rev = (u32)m->driver_data;
 
 	if (boot_cpu_data.microcode >= rev)
-		return true;
+		return;
 
 	setup_clear_cpu_cap(X86_FEATURE_TSC_DEADLINE_TIMER);
 	pr_err(FW_BUG "TSC_DEADLINE disabled due to Errata; "
 	       "please update microcode to version: 0x%x (or later)\n", rev);
-	return false;
 }
 
 /*
@@ -1528,6 +1528,9 @@ static void setup_local_APIC(void)
 {
 	int cpu = smp_processor_id();
 	unsigned int value;
+#ifdef CONFIG_X86_32
+	int logical_apicid, ldr_apicid;
+#endif
 
 
 	if (disable_apic) {
@@ -1568,21 +1571,16 @@ static void setup_local_APIC(void)
 	apic->init_apic_ldr();
 
 #ifdef CONFIG_X86_32
-	if (apic->dest_logical) {
-		int logical_apicid, ldr_apicid;
-
-		/*
-		 * APIC LDR is initialized.  If logical_apicid mapping was
-		 * initialized during get_smp_config(), make sure it matches
-		 * the actual value.
-		 */
-		logical_apicid = early_per_cpu(x86_cpu_to_logical_apicid, cpu);
-		ldr_apicid = GET_APIC_LOGICAL_ID(apic_read(APIC_LDR));
-		if (logical_apicid != BAD_APICID)
-			WARN_ON(logical_apicid != ldr_apicid);
-		/* Always use the value from LDR. */
-		early_per_cpu(x86_cpu_to_logical_apicid, cpu) = ldr_apicid;
-	}
+	/*
+	 * APIC LDR is initialized.  If logical_apicid mapping was
+	 * initialized during get_smp_config(), make sure it matches the
+	 * actual value.
+	 */
+	logical_apicid = early_per_cpu(x86_cpu_to_logical_apicid, cpu);
+	ldr_apicid = GET_APIC_LOGICAL_ID(apic_read(APIC_LDR));
+	WARN_ON(logical_apicid != BAD_APICID && logical_apicid != ldr_apicid);
+	/* always use the value from LDR */
+	early_per_cpu(x86_cpu_to_logical_apicid, cpu) = ldr_apicid;
 #endif
 
 	/*
@@ -1813,22 +1811,20 @@ static __init void try_to_enable_x2apic(int remap_mode)
 		return;
 
 	if (remap_mode != IRQ_REMAP_X2APIC_MODE) {
-		/*
-		 * Using X2APIC without IR is not architecturally supported
-		 * on bare metal but may be supported in guests.
+		/* IR is required if there is APIC ID > 255 even when running
+		 * under KVM
 		 */
-		if (!x86_init.hyper.x2apic_available()) {
+		if (max_physical_apicid > 255 ||
+		    !x86_init.hyper.x2apic_available()) {
 			pr_info("x2apic: IRQ remapping doesn't support X2APIC mode\n");
 			x2apic_disable();
 			return;
 		}
 
 		/*
-		 * Without IR, all CPUs can be addressed by IOAPIC/MSI only
-		 * in physical mode, and CPUs with an APIC ID that cannnot
-		 * be addressed must not be brought online.
+		 * without IR all CPUs can be addressed by IOAPIC/MSI
+		 * only in physical mode
 		 */
-		x2apic_set_max_apicid(255);
 		x2apic_phys = 1;
 	}
 	x2apic_enable();
@@ -2025,8 +2021,7 @@ void __init init_apic_mappings(void)
 {
 	unsigned int new_apicid;
 
-	if (apic_validate_deadline_timer())
-		pr_info("TSC deadline timer available\n");
+	apic_check_deadline_errata();
 
 	if (x2apic_mode) {
 		boot_cpu_physical_apicid = read_apic_id();

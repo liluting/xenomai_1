@@ -60,6 +60,7 @@ enum {
 	IRQS_PENDING		= 0x00000200,
 	IRQS_SUSPENDED		= 0x00000800,
 	IRQS_TIMINGS		= 0x00001000,
+	IPIPE_IRQS_NEEDS_STARTUP= 0x80000000,
 };
 
 #include "debug.h"
@@ -125,6 +126,8 @@ static inline void unregister_handler_proc(unsigned int irq,
 #endif
 
 extern bool irq_can_set_affinity_usr(unsigned int irq);
+
+extern int irq_select_affinity_usr(unsigned int irq);
 
 extern void irq_set_thread_affinity(struct irq_desc *desc);
 

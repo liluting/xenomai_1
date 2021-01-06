@@ -24,7 +24,7 @@
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
-#ifdef CONFIG_SCHED_DEBUG
+#if defined(CONFIG_SCHED_DEBUG) && defined(CONFIG_JUMP_LABEL)
 /*
  * Debugging: various feature bits
  *
@@ -1096,9 +1096,12 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	}
 
 	/* Can the task run on the task's current CPU? If so, we're done */
-	if (cpumask_test_cpu(task_cpu(p), new_mask))
+	if (cpumask_test_cpu(task_cpu(p), new_mask)) {
+		__ipipe_report_setaffinity(p, task_cpu(p));
 		goto out;
+	}
 
+	__ipipe_report_setaffinity(p, dest_cpu);
 	if (task_running(rq, p) || p->state == TASK_WAKING) {
 		struct migration_arg arg = { p, dest_cpu };
 		/* Need help from migration thread: drop lock and wait. */
@@ -1768,7 +1771,9 @@ void scheduler_ipi(void)
 	 * however a fair share of IPIs are still resched only so this would
 	 * somewhat pessimize the simple resched case.
 	 */
+#ifndef IPIPE_ARCH_HAVE_VIRQ_IPI
 	irq_enter();
+#endif
 	sched_ttwu_pending();
 
 	/*
@@ -1778,7 +1783,9 @@ void scheduler_ipi(void)
 		this_rq()->idle_balance = 1;
 		raise_softirq_irqoff(SCHED_SOFTIRQ);
 	}
+#ifndef IPIPE_ARCH_HAVE_VIRQ_IPI
 	irq_exit();
+#endif
 }
 
 static void ttwu_queue_remote(struct task_struct *p, int cpu, int wake_flags)
@@ -1960,7 +1967,8 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 */
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	smp_mb__after_spinlock();
-	if (!(p->state & state))
+	if (!(p->state & state) ||
+	    (p->state & (TASK_NOWAKEUP|TASK_HARDENING)))
 		goto out;
 
 	trace_sched_waking(p);
@@ -2345,7 +2353,6 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	 * Silence PROVE_RCU.
 	 */
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
-	rseq_migrate(p);
 	/*
 	 * We're setting the CPU for the first time, we don't migrate,
 	 * so use __set_task_cpu().
@@ -2410,7 +2417,6 @@ void wake_up_new_task(struct task_struct *p)
 	 * as we're not fully set-up yet.
 	 */
 	p->recent_used_cpu = task_cpu(p);
-	rseq_migrate(p);
 	__set_task_cpu(p, select_task_rq(p, task_cpu(p), SD_BALANCE_FORK, 0));
 #endif
 	rq = __task_rq_lock(p, &rf);
@@ -2771,6 +2777,7 @@ asmlinkage __visible void schedule_tail(struct task_struct *prev)
 	 * PREEMPT_COUNT kernels).
 	 */
 
+	__ipipe_complete_domain_migration();
 	rq = finish_task_switch(prev);
 	balance_callback(rq);
 	preempt_enable();
@@ -2827,6 +2834,9 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
 	barrier();
+
+	if (unlikely(__ipipe_switch_tail()))
+		return NULL;
 
 	return finish_task_switch(prev);
 }
@@ -3325,6 +3335,7 @@ static noinline void __schedule_bug(struct task_struct *prev)
  */
 static inline void schedule_debug(struct task_struct *prev)
 {
+	ipipe_root_only();
 #ifdef CONFIG_SCHED_STACK_END_CHECK
 	if (task_stack_end_corrupted(prev))
 		panic("corrupted stack end detected inside scheduler\n");
@@ -3424,7 +3435,7 @@ again:
  *
  * WARNING: must be called with preemption disabled!
  */
-static void __sched notrace __schedule(bool preempt)
+static bool __sched notrace __schedule(bool preempt)
 {
 	struct task_struct *prev, *next;
 	unsigned long *switch_count;
@@ -3515,12 +3526,17 @@ static void __sched notrace __schedule(bool preempt)
 
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next, &rf);
+		if (rq == NULL)
+			return true; /* task hijacked by head domain */
 	} else {
+		prev->state &= ~TASK_HARDENING;
 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 		rq_unlock_irq(rq, &rf);
 	}
 
 	balance_callback(rq);
+
+	return false;
 }
 
 void __noreturn do_task_dead(void)
@@ -3558,7 +3574,8 @@ asmlinkage __visible void __sched schedule(void)
 	sched_submit_work(tsk);
 	do {
 		preempt_disable();
-		__schedule(false);
+		if (__schedule(false))
+			return;
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 }
@@ -3638,7 +3655,8 @@ static void __sched notrace preempt_schedule_common(void)
 		 */
 		preempt_disable_notrace();
 		preempt_latency_start(1);
-		__schedule(true);
+		if (__schedule(true))
+			return;
 		preempt_latency_stop(1);
 		preempt_enable_no_resched_notrace();
 
@@ -3661,7 +3679,7 @@ asmlinkage __visible void __sched notrace preempt_schedule(void)
 	 * If there is a non-zero preempt_count or interrupts are disabled,
 	 * we do not want to preempt the current task. Just return..
 	 */
-	if (likely(!preemptible()))
+	if (likely(!preemptible() || !ipipe_root_p))
 		return;
 
 	preempt_schedule_common();
@@ -3687,7 +3705,7 @@ asmlinkage __visible void __sched notrace preempt_schedule_notrace(void)
 {
 	enum ctx_state prev_ctx;
 
-	if (likely(!preemptible()))
+	if (likely(!preemptible() || !ipipe_root_p || hard_irqs_disabled()))
 		return;
 
 	do {
@@ -3864,8 +3882,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	 */
 	if (dl_prio(prio)) {
 		if (!dl_prio(p->normal_prio) ||
-		    (pi_task && dl_prio(pi_task->prio) &&
-		     dl_entity_preempt(&pi_task->dl, &p->dl))) {
+		    (pi_task && dl_entity_preempt(&pi_task->dl, &p->dl))) {
 			p->dl.dl_boosted = 1;
 			queue_flag |= ENQUEUE_REPLENISH;
 		} else
@@ -4370,6 +4387,7 @@ change:
 
 	prev_class = p->sched_class;
 	__setscheduler(rq, p, attr, pi);
+	__ipipe_report_setsched(p);
 
 	if (queued) {
 		/*
@@ -4984,8 +5002,12 @@ static void do_sched_yield(void)
 	schedstat_inc(rq->yld_count);
 	current->sched_class->yield_task(rq);
 
+	/*
+	 * Since we are going to call schedule() anyway, there's
+	 * no need to preempt or enable interrupts:
+	 */
 	preempt_disable();
-	rq_unlock_irq(rq, &rf);
+	rq_unlock(rq, &rf);
 	sched_preempt_enable_no_resched();
 
 	schedule();
@@ -5412,11 +5434,10 @@ void init_idle(struct task_struct *idle, int cpu)
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 
-	__sched_fork(0, idle);
-
 	raw_spin_lock_irqsave(&idle->pi_lock, flags);
 	raw_spin_lock(&rq->lock);
 
+	__sched_fork(0, idle);
 	idle->state = TASK_RUNNING;
 	idle->se.exec_start = sched_clock();
 	idle->flags |= PF_IDLE;
@@ -5570,14 +5591,13 @@ void idle_task_exit(void)
 	struct mm_struct *mm = current->active_mm;
 
 	BUG_ON(cpu_online(smp_processor_id()));
-	BUG_ON(current != this_rq()->idle);
 
 	if (mm != &init_mm) {
 		switch_mm(mm, &init_mm, current);
+		current->active_mm = &init_mm;
 		finish_arch_post_lock_switch();
 	}
-
-	/* finish_cpu(), as ran on the BP, will clean up the active_mm state */
+	mmdrop(mm);
 }
 
 /*
@@ -5940,6 +5960,43 @@ int in_sched_functions(unsigned long addr)
 		(addr >= (unsigned long)__sched_text_start
 		&& addr < (unsigned long)__sched_text_end);
 }
+
+#ifdef CONFIG_IPIPE
+
+int __ipipe_migrate_head(void)
+{
+	struct task_struct *p = current;
+
+	preempt_disable();
+
+	IPIPE_WARN_ONCE(__this_cpu_read(ipipe_percpu.task_hijacked) != NULL);
+
+	__this_cpu_write(ipipe_percpu.task_hijacked, p);
+	set_current_state(TASK_INTERRUPTIBLE | TASK_HARDENING);
+	sched_submit_work(p);
+	if (likely(__schedule(false)))
+		return 0;
+
+	preempt_enable();
+	return -ERESTARTSYS;
+}
+EXPORT_SYMBOL_GPL(__ipipe_migrate_head);
+
+void __ipipe_reenter_root(void)
+{
+	struct rq *rq;
+	struct task_struct *p;
+
+	p = __this_cpu_read(ipipe_percpu.rqlock_owner);
+	BUG_ON(p == NULL);
+	ipipe_clear_thread_flag(TIP_HEAD);
+	rq = finish_task_switch(p);
+	balance_callback(rq);
+	preempt_enable_no_resched_notrace();
+}
+EXPORT_SYMBOL_GPL(__ipipe_reenter_root);
+
+#endif /* CONFIG_IPIPE */
 
 #ifdef CONFIG_CGROUP_SCHED
 /*

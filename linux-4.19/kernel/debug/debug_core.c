@@ -95,6 +95,14 @@ int dbg_switch_cpu;
 /* Use kdb or gdbserver mode */
 int dbg_kdb_mode = 1;
 
+static int __init opt_kgdb_con(char *str)
+{
+	kgdb_use_con = 1;
+	return 0;
+}
+
+early_param("kgdbcon", opt_kgdb_con);
+
 module_param(kgdb_use_con, int, 0644);
 module_param(kgdbreboot, int, 0644);
 
@@ -111,8 +119,8 @@ static struct kgdb_bkpt		kgdb_break[KGDB_MAX_BREAKPOINTS] = {
  */
 atomic_t			kgdb_active = ATOMIC_INIT(-1);
 EXPORT_SYMBOL_GPL(kgdb_active);
-static DEFINE_RAW_SPINLOCK(dbg_master_lock);
-static DEFINE_RAW_SPINLOCK(dbg_slave_lock);
+static IPIPE_DEFINE_RAW_SPINLOCK(dbg_master_lock);
+static IPIPE_DEFINE_RAW_SPINLOCK(dbg_slave_lock);
 
 /*
  * We use NR_CPUs not PERCPU, in case kgdb is used to debug early
@@ -436,7 +444,6 @@ static int kgdb_reenter_check(struct kgdb_state *ks)
 
 	if (exception_level > 1) {
 		dump_stack();
-		kgdb_io_module_registered = false;
 		panic("Recursive entry to debugger");
 	}
 
@@ -454,7 +461,9 @@ static int kgdb_reenter_check(struct kgdb_state *ks)
 static void dbg_touch_watchdogs(void)
 {
 	touch_softlockup_watchdog_sync();
+#ifndef CONFIG_IPIPE
 	clocksource_touch_watchdog();
+#endif
 	rcu_cpu_stall_reset();
 }
 
@@ -481,12 +490,11 @@ static int kgdb_cpu_enter(struct kgdb_state *ks, struct pt_regs *regs,
 		arch_kgdb_ops.disable_hw_break(regs);
 
 acquirelock:
-	rcu_read_lock();
 	/*
 	 * Interrupts will be restored by the 'trap return' code, except when
 	 * single stepping.
 	 */
-	local_irq_save(flags);
+	flags = hard_local_irq_save();
 
 	cpu = ks->cpu;
 	kgdb_info[cpu].debuggerinfo = regs;
@@ -537,8 +545,7 @@ return_normal:
 			smp_mb__before_atomic();
 			atomic_dec(&slaves_in_kgdb);
 			dbg_touch_watchdogs();
-			local_irq_restore(flags);
-			rcu_read_unlock();
+			hard_local_irq_restore(flags);
 			return 0;
 		}
 		cpu_relax();
@@ -556,8 +563,7 @@ return_normal:
 		atomic_set(&kgdb_active, -1);
 		raw_spin_unlock(&dbg_master_lock);
 		dbg_touch_watchdogs();
-		local_irq_restore(flags);
-		rcu_read_unlock();
+		hard_local_irq_restore(flags);
 
 		goto acquirelock;
 	}
@@ -572,8 +578,6 @@ return_normal:
 	 */
 	if (kgdb_skipexception(ks->ex_vector, ks->linux_regs))
 		goto kgdb_restore;
-
-	atomic_inc(&ignore_console_lock_warning);
 
 	/* Call the I/O driver's pre_exception routine */
 	if (dbg_io_ops->pre_exception)
@@ -647,8 +651,6 @@ cpu_master_loop:
 	if (dbg_io_ops->post_exception)
 		dbg_io_ops->post_exception();
 
-	atomic_dec(&ignore_console_lock_warning);
-
 	if (!kgdb_single_step) {
 		raw_spin_unlock(&dbg_slave_lock);
 		/* Wait till all the CPUs have quit from the debugger. */
@@ -680,8 +682,7 @@ kgdb_restore:
 	atomic_set(&kgdb_active, -1);
 	raw_spin_unlock(&dbg_master_lock);
 	dbg_touch_watchdogs();
-	local_irq_restore(flags);
-	rcu_read_unlock();
+	hard_local_irq_restore(flags);
 
 	return kgdb_info[cpu].ret_state;
 }
@@ -800,9 +801,9 @@ static void kgdb_console_write(struct console *co, const char *s,
 	if (!kgdb_connected || atomic_read(&kgdb_active) != -1 || dbg_kdb_mode)
 		return;
 
-	local_irq_save(flags);
+	flags = hard_local_irq_save();
 	gdbstub_msg_write(s, count);
-	local_irq_restore(flags);
+	hard_local_irq_restore(flags);
 }
 
 static struct console kgdbcons = {
@@ -811,20 +812,6 @@ static struct console kgdbcons = {
 	.flags		= CON_PRINTBUFFER | CON_ENABLED,
 	.index		= -1,
 };
-
-static int __init opt_kgdb_con(char *str)
-{
-	kgdb_use_con = 1;
-
-	if (kgdb_io_module_registered && !kgdb_con_registered) {
-		register_console(&kgdbcons);
-		kgdb_con_registered = 1;
-	}
-
-	return 0;
-}
-
-early_param("kgdbcon", opt_kgdb_con);
 
 #ifdef CONFIG_MAGIC_SYSRQ
 static void sysrq_handle_dbg(int key)

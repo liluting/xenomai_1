@@ -137,10 +137,6 @@ static int tunnel_key_copy_opts(const struct nlattr *nla, u8 *dst,
 			if (opt_len < 0)
 				return opt_len;
 			opts_len += opt_len;
-			if (opts_len > IP_TUNNEL_OPTS_MAX) {
-				NL_SET_ERR_MSG(extack, "Tunnel options exceeds max size");
-				return -EINVAL;
-			}
 			if (dst) {
 				dst_len -= opt_len;
 				dst += opt_len;
@@ -314,7 +310,7 @@ static int tunnel_key_init(struct net *net, struct nlattr *nla,
 
 			metadata = __ipv6_tun_set_dst(&saddr, &daddr, tos, ttl, dst_port,
 						      0, flags,
-						      key_id, opts_len);
+						      key_id, 0);
 		} else {
 			NL_SET_ERR_MSG(extack, "Missing either ipv4 or ipv6 src and dst");
 			ret = -EINVAL;

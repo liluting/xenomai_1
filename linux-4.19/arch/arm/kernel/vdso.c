@@ -21,6 +21,7 @@
 #include <linux/elf.h>
 #include <linux/err.h>
 #include <linux/kernel.h>
+#include <linux/ipipe.h>
 #include <linux/mm.h>
 #include <linux/of.h>
 #include <linux/printk.h>
@@ -103,8 +104,6 @@ static bool __init cntvct_functional(void)
 	 * this.
 	 */
 	np = of_find_compatible_node(NULL, NULL, "arm,armv7-timer");
-	if (!np)
-		np = of_find_compatible_node(NULL, NULL, "arm,armv8-timer");
 	if (!np)
 		goto out_put;
 
@@ -207,6 +206,7 @@ static int __init vdso_init(void)
 	}
 
 	text_pages = (vdso_end - vdso_start) >> PAGE_SHIFT;
+	pr_debug("vdso: %i text pages at base %p\n", text_pages, vdso_start);
 
 	/* Allocate the VDSO text pagelist */
 	vdso_text_pagelist = kcalloc(text_pages, sizeof(struct page *),
@@ -319,6 +319,8 @@ static bool tk_is_cntvct(const struct timekeeper *tk)
 void update_vsyscall(struct timekeeper *tk)
 {
 	struct timespec64 *wtm = &tk->wall_to_monotonic;
+
+	__ipipe_update_vsyscall(tk);
 
 	if (!cntvct_ok) {
 		/* The entry points have been zeroed, so there is no

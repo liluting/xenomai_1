@@ -1251,8 +1251,7 @@ static inline __u32 skb_get_hash_flowi6(struct sk_buff *skb, const struct flowi6
 	return skb->hash;
 }
 
-__u32 skb_get_hash_perturb(const struct sk_buff *skb,
-			   const siphash_key_t *perturb);
+__u32 skb_get_hash_perturb(const struct sk_buff *skb, u32 perturb);
 
 static inline __u32 skb_get_hash_raw(const struct sk_buff *skb)
 {
@@ -1379,19 +1378,6 @@ static inline int skb_queue_empty(const struct sk_buff_head *list)
 {
 	return list->next == (const struct sk_buff *) list;
 }
-
-/**
- *	skb_queue_empty_lockless - check if a queue is empty
- *	@list: queue head
- *
- *	Returns true if the queue is empty, false otherwise.
- *	This variant can be used in lockless contexts.
- */
-static inline bool skb_queue_empty_lockless(const struct sk_buff_head *list)
-{
-	return READ_ONCE(list->next) == (const struct sk_buff *) list;
-}
-
 
 /**
  *	skb_queue_is_last - check if skb is the last entry in the queue
@@ -1669,7 +1655,7 @@ static inline struct sk_buff *skb_peek_next(struct sk_buff *skb,
  */
 static inline struct sk_buff *skb_peek_tail(const struct sk_buff_head *list_)
 {
-	struct sk_buff *skb = READ_ONCE(list_->prev);
+	struct sk_buff *skb = list_->prev;
 
 	if (skb == (struct sk_buff *)list_)
 		skb = NULL;
@@ -1686,18 +1672,6 @@ static inline struct sk_buff *skb_peek_tail(const struct sk_buff_head *list_)
 static inline __u32 skb_queue_len(const struct sk_buff_head *list_)
 {
 	return list_->qlen;
-}
-
-/**
- *	skb_queue_len_lockless	- get queue length
- *	@list_: list to measure
- *
- *	Return the length of an &sk_buff queue.
- *	This variant can be used in lockless contexts.
- */
-static inline __u32 skb_queue_len_lockless(const struct sk_buff_head *list_)
-{
-	return READ_ONCE(list_->qlen);
 }
 
 /**
@@ -1749,13 +1723,9 @@ static inline void __skb_insert(struct sk_buff *newsk,
 				struct sk_buff *prev, struct sk_buff *next,
 				struct sk_buff_head *list)
 {
-	/* See skb_queue_empty_lockless() and skb_peek_tail()
-	 * for the opposite READ_ONCE()
-	 */
-	WRITE_ONCE(newsk->next, next);
-	WRITE_ONCE(newsk->prev, prev);
-	WRITE_ONCE(next->prev, newsk);
-	WRITE_ONCE(prev->next, newsk);
+	newsk->next = next;
+	newsk->prev = prev;
+	next->prev  = prev->next = newsk;
 	list->qlen++;
 }
 
@@ -1766,11 +1736,11 @@ static inline void __skb_queue_splice(const struct sk_buff_head *list,
 	struct sk_buff *first = list->next;
 	struct sk_buff *last = list->prev;
 
-	WRITE_ONCE(first->prev, prev);
-	WRITE_ONCE(prev->next, first);
+	first->prev = prev;
+	prev->next = first;
 
-	WRITE_ONCE(last->next, next);
-	WRITE_ONCE(next->prev, last);
+	last->next = next;
+	next->prev = last;
 }
 
 /**
@@ -1907,12 +1877,12 @@ static inline void __skb_unlink(struct sk_buff *skb, struct sk_buff_head *list)
 {
 	struct sk_buff *next, *prev;
 
-	WRITE_ONCE(list->qlen, list->qlen - 1);
+	list->qlen--;
 	next	   = skb->next;
 	prev	   = skb->prev;
 	skb->next  = skb->prev = NULL;
-	WRITE_ONCE(next->prev, prev);
-	WRITE_ONCE(prev->next, next);
+	next->prev = prev;
+	prev->next = next;
 }
 
 /**
@@ -3026,9 +2996,8 @@ static inline int skb_padto(struct sk_buff *skb, unsigned int len)
  *	is untouched. Otherwise it is extended. Returns zero on
  *	success. The skb is freed on error if @free_on_error is true.
  */
-static inline int __must_check __skb_put_padto(struct sk_buff *skb,
-					       unsigned int len,
-					       bool free_on_error)
+static inline int __skb_put_padto(struct sk_buff *skb, unsigned int len,
+				  bool free_on_error)
 {
 	unsigned int size = skb->len;
 
@@ -3051,7 +3020,7 @@ static inline int __must_check __skb_put_padto(struct sk_buff *skb,
  *	is untouched. Otherwise it is extended. Returns zero on
  *	success. The skb is freed on error.
  */
-static inline int __must_check skb_put_padto(struct sk_buff *skb, unsigned int len)
+static inline int skb_put_padto(struct sk_buff *skb, unsigned int len)
 {
 	return __skb_put_padto(skb, len, true);
 }

@@ -278,7 +278,7 @@ static int rpm_get_suppliers(struct device *dev)
 			pm_runtime_put_noidle(link->supplier);
 			return retval;
 		}
-		refcount_inc(&link->rpm_active);
+		refcount_inc((refcount_t *)&link->rpm_active);
 	}
 	return 0;
 }
@@ -291,7 +291,7 @@ static void rpm_put_suppliers(struct device *dev)
 		if (READ_ONCE(link->status) == DL_STATE_SUPPLIER_UNBIND)
 			continue;
 
-		while (refcount_dec_not_one(&link->rpm_active))
+		while (refcount_dec_not_one((refcount_t *)&link->rpm_active))
 			pm_runtime_put(link->supplier);
 	}
 }
@@ -1551,7 +1551,7 @@ void pm_runtime_clean_up_links(struct device *dev)
 		if (!(link->flags & DL_FLAG_MANAGED))
 			continue;
 
-		while (refcount_dec_not_one(&link->rpm_active))
+		while (refcount_dec_not_one((refcount_t *)&link->rpm_active))
 			pm_runtime_put_noidle(dev);
 	}
 
@@ -1593,7 +1593,7 @@ void pm_runtime_put_suppliers(struct device *dev)
 	list_for_each_entry_rcu(link, &dev->links.suppliers, c_node)
 		if (link->supplier_preactivated) {
 			link->supplier_preactivated = false;
-			if (refcount_dec_not_one(&link->rpm_active))
+			if (refcount_dec_not_one((refcount_t *)&link->rpm_active))
 				pm_runtime_put(link->supplier);
 		}
 

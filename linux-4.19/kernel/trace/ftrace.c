@@ -35,6 +35,7 @@
 #include <linux/hash.h>
 #include <linux/rcupdate.h>
 #include <linux/kprobes.h>
+#include <linux/ipipe.h>
 
 #include <trace/events/sched.h>
 
@@ -214,7 +215,16 @@ static ftrace_func_t ftrace_ops_get_list_func(struct ftrace_ops *ops)
 
 static void update_ftrace_function(void)
 {
+	struct ftrace_ops *ops;
 	ftrace_func_t func;
+
+	for (ops = ftrace_ops_list;
+	     ops != &ftrace_list_end; ops = ops->next)
+		if (ops->flags & FTRACE_OPS_FL_IPIPE_EXCLUSIVE) {
+			set_function_trace_op = ops;
+			func = ops->func;
+			goto set_pointers;
+		}
 
 	/*
 	 * Prepare the ftrace_ops that the arch callback will use.
@@ -245,6 +255,7 @@ static void update_ftrace_function(void)
 
 	update_function_graph_func();
 
+  set_pointers:
 	/* If there's no change, then do nothing more here */
 	if (ftrace_trace_function == func)
 		return;
@@ -554,7 +565,8 @@ static int function_stat_show(struct seq_file *m, void *v)
 	}
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
-	avg = div64_ul(rec->time, rec->counter);
+	avg = rec->time;
+	do_div(avg, rec->counter);
 	if (tracing_thresh && (avg < tracing_thresh))
 		goto out;
 #endif
@@ -580,8 +592,7 @@ static int function_stat_show(struct seq_file *m, void *v)
 		 * Divide only 1000 for ns^2 -> us^2 conversion.
 		 * trace_print_graph_duration will divide 1000 again.
 		 */
-		stddev = div64_ul(stddev,
-				  rec->counter * (rec->counter - 1) * 1000);
+		do_div(stddev, rec->counter * (rec->counter - 1) * 1000);
 	}
 
 	trace_seq_init(&s);
@@ -1650,8 +1661,6 @@ static bool test_rec_ops_needs_regs(struct dyn_ftrace *rec)
 static struct ftrace_ops *
 ftrace_find_tramp_ops_any(struct dyn_ftrace *rec);
 static struct ftrace_ops *
-ftrace_find_tramp_ops_any_other(struct dyn_ftrace *rec, struct ftrace_ops *op_exclude);
-static struct ftrace_ops *
 ftrace_find_tramp_ops_next(struct dyn_ftrace *rec, struct ftrace_ops *ops);
 
 static bool __ftrace_hash_rec_update(struct ftrace_ops *ops,
@@ -1789,7 +1798,7 @@ static bool __ftrace_hash_rec_update(struct ftrace_ops *ops,
 			 * to it.
 			 */
 			if (ftrace_rec_count(rec) == 1 &&
-			    ftrace_find_tramp_ops_any_other(rec, ops))
+			    ftrace_find_tramp_ops_any(rec))
 				rec->flags |= FTRACE_FL_TRAMP;
 			else
 				rec->flags &= ~FTRACE_FL_TRAMP;
@@ -2218,24 +2227,6 @@ ftrace_find_tramp_ops_any(struct dyn_ftrace *rec)
 }
 
 static struct ftrace_ops *
-ftrace_find_tramp_ops_any_other(struct dyn_ftrace *rec, struct ftrace_ops *op_exclude)
-{
-	struct ftrace_ops *op;
-	unsigned long ip = rec->ip;
-
-	do_for_each_ftrace_op(op, ftrace_ops_list) {
-
-		if (op == op_exclude || !op->trampoline)
-			continue;
-
-		if (hash_contains_ip(ip, op->func_hash))
-			return op;
-	} while_for_each_ftrace_op(op);
-
-	return NULL;
-}
-
-static struct ftrace_ops *
 ftrace_find_tramp_ops_next(struct dyn_ftrace *rec,
 			   struct ftrace_ops *op)
 {
@@ -2647,6 +2638,9 @@ void __weak arch_ftrace_update_code(int command)
 
 static void ftrace_run_update_code(int command)
 {
+#ifdef CONFIG_IPIPE
+	unsigned long flags;
+#endif /* CONFIG_IPIPE */
 	int ret;
 
 	ret = ftrace_arch_code_modify_prepare();
@@ -5092,8 +5086,8 @@ static const struct file_operations ftrace_notrace_fops = {
 
 static DEFINE_MUTEX(graph_lock);
 
-struct ftrace_hash __rcu *ftrace_graph_hash = EMPTY_HASH;
-struct ftrace_hash __rcu *ftrace_graph_notrace_hash = EMPTY_HASH;
+struct ftrace_hash *ftrace_graph_hash = EMPTY_HASH;
+struct ftrace_hash *ftrace_graph_notrace_hash = EMPTY_HASH;
 
 enum graph_filter_type {
 	GRAPH_FILTER_NOTRACE	= 0,
@@ -5364,15 +5358,8 @@ ftrace_graph_release(struct inode *inode, struct file *file)
 
 		mutex_unlock(&graph_lock);
 
-		/*
-		 * We need to do a hard force of sched synchronization.
-		 * This is because we use preempt_disable() to do RCU, but
-		 * the function tracers can be called where RCU is not watching
-		 * (like before user_exit()). We can not rely on the RCU
-		 * infrastructure to do the synchronization, thus we must do it
-		 * ourselves.
-		 */
-		schedule_on_each_cpu(ftrace_sync);
+		/* Wait till all users are no longer using the old hash */
+		synchronize_sched();
 
 		free_ftrace_hash(old_hash);
 	}
@@ -5645,10 +5632,10 @@ static int ftrace_process_locs(struct module *mod,
 	 * reason to cause large interrupt latencies while we do it.
 	 */
 	if (!mod)
-		local_irq_save(flags);
+		flags = hard_local_irq_save();
 	ftrace_update_code(mod, start_pg);
 	if (!mod)
-		local_irq_restore(flags);
+		hard_local_irq_restore(flags);
 	ret = 0;
  out:
 	mutex_unlock(&ftrace_lock);
@@ -5685,11 +5672,8 @@ static int referenced_filters(struct dyn_ftrace *rec)
 	int cnt = 0;
 
 	for (ops = ftrace_ops_list; ops != &ftrace_list_end; ops = ops->next) {
-		if (ops_references_rec(ops, rec)) {
-			cnt++;
-			if (ops->flags & FTRACE_OPS_FL_SAVE_REGS)
-				rec->flags |= FTRACE_FL_REGS;
-		}
+		if (ops_references_rec(ops, rec))
+		    cnt++;
 	}
 
 	return cnt;
@@ -5866,8 +5850,8 @@ void ftrace_module_enable(struct module *mod)
 		if (ftrace_start_up)
 			cnt += referenced_filters(rec);
 
-		rec->flags &= ~FTRACE_FL_DISABLED;
-		rec->flags += cnt;
+		/* This clears FTRACE_FL_DISABLED */
+		rec->flags = cnt;
 
 		if (ftrace_start_up && cnt) {
 			int failed = __ftrace_replace_code(rec, 1);
@@ -6193,9 +6177,11 @@ void __init ftrace_init(void)
 	unsigned long count, flags;
 	int ret;
 
-	local_irq_save(flags);
+	flags = hard_local_irq_save_notrace();
 	ret = ftrace_dyn_arch_init();
-	local_irq_restore(flags);
+	hard_local_irq_restore_notrace(flags);
+
+	/* ftrace_dyn_arch_init places the return code in addr */
 	if (ret)
 		goto failed;
 
@@ -6348,7 +6334,16 @@ __ftrace_ops_list_func(unsigned long ip, unsigned long parent_ip,
 		}
 	} while_for_each_ftrace_op(op);
 out:
-	preempt_enable_notrace();
+#ifdef CONFIG_IPIPE
+	if (hard_irqs_disabled() || !ipipe_root_p)
+		/*
+		 * Nothing urgent to schedule here. At latest the timer tick
+		 * will pick up whatever the tracing functions kicked off.
+		 */
+		preempt_enable_no_resched_notrace();
+	else
+#endif
+		preempt_enable_notrace();
 	trace_clear_recursion(bit);
 }
 
@@ -6390,14 +6385,16 @@ static void ftrace_ops_assist_func(unsigned long ip, unsigned long parent_ip,
 {
 	int bit;
 
+	if ((op->flags & FTRACE_OPS_FL_RCU) && !rcu_is_watching())
+		return;
+
 	bit = trace_test_and_set_recursion(TRACE_LIST_START, TRACE_LIST_MAX);
 	if (bit < 0)
 		return;
 
 	preempt_disable_notrace();
 
-	if (!(op->flags & FTRACE_OPS_FL_RCU) || rcu_is_watching())
-		op->func(ip, parent_ip, op, regs);
+	op->func(ip, parent_ip, op, regs);
 
 	preempt_enable_notrace();
 	trace_clear_recursion(bit);
@@ -6468,12 +6465,12 @@ void ftrace_pid_follow_fork(struct trace_array *tr, bool enable)
 	if (enable) {
 		register_trace_sched_process_fork(ftrace_pid_follow_sched_process_fork,
 						  tr);
-		register_trace_sched_process_free(ftrace_pid_follow_sched_process_exit,
+		register_trace_sched_process_exit(ftrace_pid_follow_sched_process_exit,
 						  tr);
 	} else {
 		unregister_trace_sched_process_fork(ftrace_pid_follow_sched_process_fork,
 						    tr);
-		unregister_trace_sched_process_free(ftrace_pid_follow_sched_process_exit,
+		unregister_trace_sched_process_exit(ftrace_pid_follow_sched_process_exit,
 						    tr);
 	}
 }
@@ -6546,10 +6543,9 @@ static void *fpid_next(struct seq_file *m, void *v, loff_t *pos)
 	struct trace_array *tr = m->private;
 	struct trace_pid_list *pid_list = rcu_dereference_sched(tr->function_pids);
 
-	if (v == FTRACE_NO_PIDS) {
-		(*pos)++;
+	if (v == FTRACE_NO_PIDS)
 		return NULL;
-	}
+
 	return trace_pid_next(pid_list, v, pos);
 }
 

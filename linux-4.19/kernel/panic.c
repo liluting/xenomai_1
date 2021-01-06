@@ -20,8 +20,10 @@
 #include <linux/ftrace.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
+#include <linux/ipipe_trace.h>
 #include <linux/kexec.h>
 #include <linux/sched.h>
+#include <linux/ipipe.h>
 #include <linux/sysrq.h>
 #include <linux/init.h>
 #include <linux/nmi.h>
@@ -469,6 +471,8 @@ void oops_enter(void)
 {
 	tracing_off();
 	/* can't trust the integrity of the kernel anymore: */
+	ipipe_trace_panic_freeze();
+	ipipe_disable_context_check();
 	debug_locks_off();
 	do_oops_enter_exit();
 }
@@ -636,7 +640,7 @@ device_initcall(register_warn_debugfs);
  */
 __visible void __stack_chk_fail(void)
 {
-	panic("stack-protector: Kernel stack is corrupted in: %pB",
+	panic("stack-protector: Kernel stack is corrupted in: %pB\n",
 		__builtin_return_address(0));
 }
 EXPORT_SYMBOL(__stack_chk_fail);

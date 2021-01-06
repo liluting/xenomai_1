@@ -45,6 +45,7 @@
 #include <linux/cpuset.h>
 #include <linux/cgroup.h>
 #include <linux/efi.h>
+#include <linux/ipipe.h>
 #include <linux/tick.h>
 #include <linux/sched/isolation.h>
 #include <linux/interrupt.h>
@@ -105,6 +106,7 @@
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
+extern void fork_init(void);
 extern void radix_tree_init(void);
 
 /*
@@ -538,7 +540,7 @@ asmlinkage __visible void __init start_kernel(void)
 
 	cgroup_init_early();
 
-	local_irq_disable();
+	hard_local_irq_disable();
 	early_boot_irqs_disabled = true;
 
 	/*
@@ -585,6 +587,7 @@ asmlinkage __visible void __init start_kernel(void)
 	setup_log_buf(0);
 	vfs_caches_init_early();
 	sort_main_extable();
+	__ipipe_init_early();
 	trap_init();
 	mm_init();
 
@@ -641,6 +644,12 @@ asmlinkage __visible void __init start_kernel(void)
 	softirq_init();
 	timekeeping_init();
 	time_init();
+	/*
+	 * We need to wait for the interrupt and time subsystems to be
+	 * initialized before enabling the pipeline.
+	 */
+	__ipipe_init();
+	printk_safe_init();
 	perf_event_init();
 	profile_init();
 	call_function_init();
@@ -734,8 +743,6 @@ asmlinkage __visible void __init start_kernel(void)
 
 	/* Do the rest non-__init'ed, we're now alive */
 	rest_init();
-
-	prevent_tail_call_optimization();
 }
 
 /* Call all constructor functions linked into the kernel. */
@@ -973,6 +980,7 @@ static void __init do_basic_setup(void)
 	shmem_init();
 	driver_init();
 	init_irq_proc();
+	__ipipe_init_proc();
 	do_ctors();
 	usermodehelper_enable();
 	do_initcalls();
