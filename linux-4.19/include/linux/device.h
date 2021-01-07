@@ -829,6 +829,7 @@ enum device_link_state {
 #define DL_FLAG_PM_RUNTIME		BIT(2)
 #define DL_FLAG_RPM_ACTIVE		BIT(3)
 #define DL_FLAG_AUTOREMOVE_SUPPLIER	BIT(4)
+#define DL_FLAG_MANAGED	BIT(6)
 
 /**
  * struct device_link - Device link representation.
